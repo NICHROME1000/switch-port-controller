@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys
 from datetime import datetime
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 def log_msg(msg: str, is_error: bool = False):
     """年月日時分秒付きでログを出力する"""
@@ -14,52 +14,55 @@ def configure_port(switch_ip, username, password, port_num, enable_state):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
+        try:
+            context = browser.new_context()
+            # 各操作・ナビゲーションのタイムアウトを15秒に設定
+            context.set_default_timeout(15000)
+            context.set_default_navigation_timeout(15000)
+            page = context.new_page()
 
-        log_msg(f"[*] スイッチ ({switch_ip}) のログインページにアクセス中...")
-        page.goto(f"{base_url}/", timeout=15000)
+            log_msg(f"[*] スイッチ ({switch_ip}) のログインページにアクセス中...")
+            page.goto(f"{base_url}/", timeout=15000)
 
-        # 1. ログイン処理
-        log_msg("[*] ログイン情報を入力中...")
-        page.fill('input[name="username"]', username)
-        page.fill('input[name="password"]', password)
-        page.click('input#loginsub')
+            # 1. ログイン処理
+            log_msg("[*] ログイン情報を入力中...")
+            page.fill('input[name="username"]', username)
+            page.fill('input[name="password"]', password)
+            page.click('input#loginsub')
 
-        page.wait_for_load_state("networkidle")
-        log_msg("[+] ログイン完了。フレームを探索中...")
+            # networkidleの無制限待機を防ぐため10秒タイムアウトを指定
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                log_msg("[!] networkidle の待機がタイムアウトしましたが処理を継続します。")
 
-        # 2. メニューフレームの取得と「Port Setting」クリック
-        menu_frame = page.frame_locator("xpath=/html/frameset/frame[2]")
+            log_msg("[+] ログイン完了。フレームを探索中...")
 
-        log_msg("[*] メニューの 'Port Setting' をクリック中...")
-        menu_frame.locator('a[href="port.cgi"]').evaluate("el => el.click()")
+            # 2. メニューフレームの取得と「Port Setting」クリック
+            menu_frame = page.frame_locator("xpath=/html/frameset/frame[2]")
+            log_msg("[*] メニューの 'Port Setting' をクリック中...")
+            menu_frame.locator('a[href="port.cgi"]').evaluate("el => el.click()")
 
-        # 3. メインフレームの取得
-        main_frame = page.frame_locator('frame[name="main-frame"]')
+            # 3. メインフレームの取得
+            main_frame = page.frame_locator('frame[name="main-frame"]')
 
-        # 4. Port Setting 画面の読み込み待機
-        log_msg("[*] Port Setting 画面の読み込みを待機中...")
-        main_frame.locator('form[name="portcfg"]').wait_for(state="attached", timeout=15000)
+            # 4. Port Setting 画面の読み込み待機
+            log_msg("[*] Port Setting 画面の読み込みを待機中...")
+            main_frame.locator('form[name="portcfg"]').wait_for(state="attached", timeout=15000)
 
-        # 5. ポート設定の変更
-        log_msg(f"[*] Port {port_num} の設定を変更中...")
-        chk_id = f"port{port_num - 1}"
+            # 5. ポート設定の変更
+            log_msg(f"[*] Port {port_num} の設定を変更中...")
+            chk_id = f"port{port_num - 1}"
 
-        if 1 <= port_num <= 8:
             form = main_frame.locator('form[name="portcfg"]')
-            
-            # チェックボックスをオンにして chkClick を発火
             form.locator(f"input#{chk_id}").evaluate("""el => {
                 el.checked = true;
                 if (typeof chkClick === 'function') chkClick(el);
             }""")
 
-            # State の選択 (1: Enable, 0: Disable)
             state_val = "1" if enable_state else "0"
             form.locator('select[name="state"]').select_option(value=state_val)
 
-            # Apply 処理
             log_msg("[*] 設定を適用 (Apply) しています...")
             form.evaluate("""form => {
                 if (typeof btnPortCfgClick === 'function') {
@@ -69,37 +72,21 @@ def configure_port(switch_ip, username, password, port_num, enable_state):
                 }
             }""")
 
-        elif port_num == 9:
-            form = main_frame.locator('form[name="extportcfg"]')
-            
-            form.locator(f"input#{chk_id}").evaluate("""el => {
-                el.checked = true;
-                if (typeof extchkClick === 'function') extchkClick(el);
-            }""")
+            # 設定反映後の待機
+            page.wait_for_timeout(3000)
+            action_str = "有効化 (Enable)" if enable_state else "無効化 (Disable)"
+            log_msg(f"[+] Port {port_num} の {action_str} が完了しました。")
 
-            state_val = "1" if enable_state else "0"
-            form.locator('select[name="state"]').select_option(value=state_val)
-
-            log_msg("[*] 設定を適用 (Apply) しています...")
-            form.evaluate("""form => {
-                if (typeof btnExtPortCfgClick === 'function') {
-                    btnExtPortCfgClick();
-                } else {
-                    form.submit();
-                }
-            }""")
-
-        # 設定反映後の待機
-        page.wait_for_timeout(3000)
-        action_str = "有効化 (Enable)" if enable_state else "無効化 (Disable)"
-        log_msg(f"[+] Port {port_num} の {action_str} が完了しました。")
-
-        browser.close()
+        except Exception as e:
+            log_msg(f"[!] エラーが発生しました: {e}", is_error=True)
+            sys.exit(1)
+        finally:
+            # 異常終了時も必ずブラウザを閉じてプロセス残留を防ぐ
+            browser.close()
 
 if __name__ == "__main__":
     if len(sys.argv) < 6:
-        log_msg(f"Usage: {sys.argv[0]} <ip_address> <username> <password> <port(1-9)> <enable|disable>", is_error=True)
-        log_msg(f"Example: {sys.argv[0]} 192.168.100.4 admin 'your_password' 8 disable", is_error=True)
+        log_msg(f"Usage: {sys.argv[0]} <ip_address> <username> <password> <port(1-8)> <enable|disable>", is_error=True)
         sys.exit(1)
 
     ip = sys.argv[1]
@@ -107,5 +94,9 @@ if __name__ == "__main__":
     pwd = sys.argv[3]
     target_port = int(sys.argv[4])
     is_enable = sys.argv[5].lower() == "enable"
+
+    if not 1 <= target_port <= 8:
+        log_msg("[!] ポート番号は 1 〜 8 の範囲で指定してください（Port 9 は非対応）。", is_error=True)
+        sys.exit(1)
 
     configure_port(ip, user, pwd, target_port, is_enable)
