@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import ast
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -9,14 +10,36 @@ def log_msg(msg: str, is_error: bool = False):
     target_stream = sys.stderr if is_error else sys.stdout
     print(f"[{now_str}] {msg}", file=target_stream, flush=True)
 
-def configure_port_tlsg108e(switch_ip, username, password, port_num, enable_state):
+def parse_ports(port_arg: str):
+    """Parse port argument like '[1, 2, 8]' or '8' into a list of unique integers."""
+    raw = port_arg.strip()
+    try:
+        if raw.startswith("[") and raw.endswith("]"):
+            parsed = ast.literal_eval(raw)
+            if not isinstance(parsed, (list, tuple)):
+                raise ValueError()
+            ports = [int(p) for p in parsed]
+        else:
+            ports = [int(raw)]
+    except Exception:
+        raise ValueError(f"Invalid format: '{port_arg}'")
+
+    if not ports:
+        raise ValueError("Port list cannot be empty.")
+
+    for p in ports:
+        if not (1 <= p <= 8):
+            raise ValueError(f"Port {p} is out of range. Supported ports are 1 to 8.")
+
+    return sorted(list(set(ports)))
+
+def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable_state):
     base_url = f"http://{switch_ip}"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
             context = browser.new_context()
-            # Set default operation and navigation timeouts to 15 seconds
             context.set_default_timeout(15000)
             context.set_default_navigation_timeout(15000)
             page = context.new_page()
@@ -30,7 +53,6 @@ def configure_port_tlsg108e(switch_ip, username, password, port_num, enable_stat
             page.fill('input#password', password)
             page.click('input#logon')
 
-            # Cap networkidle wait time to 10 seconds
             try:
                 page.wait_for_load_state("networkidle", timeout=10000)
             except PlaywrightTimeoutError:
@@ -44,11 +66,9 @@ def configure_port_tlsg108e(switch_ip, username, password, port_num, enable_stat
                     log_msg(f"[!] Login failed: {error_text}", is_error=True)
                     sys.exit(1)
 
-            # Confirm target main frame is loaded
             try:
                 page.wait_for_selector('frame[name="mainFrame"], frame[src*="Rpm.htm"]', state="attached", timeout=5000)
             except PlaywrightTimeoutError:
-                # Re-check ret_info in case of slow rendering
                 if ret_info.is_visible():
                     error_text = ret_info.inner_text().strip()
                     log_msg(f"[!] Login failed: {error_text}", is_error=True)
@@ -72,22 +92,33 @@ def configure_port_tlsg108e(switch_ip, username, password, port_num, enable_stat
             form = main_frame.locator('form[name="port_setting"]')
             form.wait_for(state="attached", timeout=15000)
 
-            # 5. Modify port configuration
-            log_msg(f"[*] Configuring Port {port_num}...")
-            port_sel = form.locator('select#portSel')
-            port_sel.select_option(value=str(port_num))
-
             state_val = "1" if enable_state else "0"
-            form.locator('select[name="state"]').select_option(value=state_val)
+            expected_text = "Enabled" if enable_state else "Disabled"
 
-            # 6. Apply settings
-            log_msg("[*] Applying port settings...")
-            form.locator('input[name="apply"]').evaluate("el => el.click()")
+            # 5. Loop through target ports with verification
+            for port_num in target_ports:
+                log_msg(f"[*] Configuring Port {port_num} to '{expected_text}'...")
+                port_sel = form.locator('select#portSel')
+                port_sel.select_option(value=str(port_num))
+                form.locator('select[name="state"]').select_option(value=state_val)
 
-            # Wait for settings to apply and page to stabilize
-            page.wait_for_timeout(3000)
-            action_str = "Enabled" if enable_state else "Disabled"
-            log_msg(f"[+] Successfully {action_str} Port {port_num}.")
+                # Submit form via Apply button
+                form.locator('input[name="apply"]').evaluate("el => el.click()")
+
+                # 6. Verify status update on the table
+                # TL-SG108E displays port list in table rows where column 1 is Port Number and column 2 is State
+                row_locator = main_frame.locator(f"tr:has-text('Port {port_num}'), tr:has(td:text-is('{port_num}'))")
+                try:
+                    # Wait up to 5 seconds for the state cell to reflect the expected text
+                    row_locator.locator(f"text={expected_text}").first.wait_for(state="visible", timeout=5000)
+                    log_msg(f"[+] Port {port_num} verified: successfully switched to '{expected_text}'.")
+                except PlaywrightTimeoutError:
+                    log_msg(f"[!] Warning: Timed out waiting for table verification on Port {port_num}. Proceeding.", is_error=True)
+
+                # 1-second delay before moving to the next port
+                page.wait_for_timeout(1000)
+
+            log_msg(f"[+] All requested ports {target_ports} successfully processed.")
 
         except Exception as e:
             log_msg(f"[!] An error occurred: {e}", is_error=True)
@@ -97,28 +128,24 @@ def configure_port_tlsg108e(switch_ip, username, password, port_num, enable_stat
 
 if __name__ == "__main__":
     if len(sys.argv) < 6:
-        log_msg(f"Usage: {sys.argv[0]} <ip_address> <username> <password> <port(1-8)> <enable|disable>", is_error=True)
-        log_msg(f"Example: {sys.argv[0]} 192.168.100.205 admin 'password' 8 disable", is_error=True)
+        log_msg(f"Usage: {sys.argv[0]} <ip_address> <username> <password> <'[1, 2, 8]'> <enable|disable>", is_error=True)
+        log_msg(f"Example: {sys.argv[0]} 192.168.100.205 admin 'password' '[1, 2, 8]' disable", is_error=True)
         sys.exit(1)
 
     ip = sys.argv[1]
     user = sys.argv[2]
     pwd = sys.argv[3]
 
-    # Validate port number (must be integer 1 to 8)
     try:
-        port = int(sys.argv[4])
-        if not (1 <= port <= 8):
-            raise ValueError()
-    except ValueError:
-        log_msg(f"[!] Invalid port number '{sys.argv[4]}'. Port must be an integer between 1 and 8.", is_error=True)
+        ports = parse_ports(sys.argv[4])
+    except ValueError as e:
+        log_msg(f"[!] Invalid port specification: {e}", is_error=True)
         sys.exit(1)
 
-    # Validate action argument
     state = sys.argv[5].lower()
     if state not in ("enable", "disable"):
         log_msg(f"[!] Invalid action '{sys.argv[5]}'. Action must be 'enable' or 'disable'.", is_error=True)
         sys.exit(1)
 
     is_enable = (state == "enable")
-    configure_port_tlsg108e(ip, user, pwd, port, is_enable)
+    configure_ports_tlsg108e(ip, user, pwd, ports, is_enable)
