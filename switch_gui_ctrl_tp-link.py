@@ -37,7 +37,16 @@ def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable
     base_url = f"http://{switch_ip}"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Launch Chromium with low-memory footprint arguments
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process"
+            ]
+        )
         try:
             context = browser.new_context()
             context.set_default_timeout(15000)
@@ -106,16 +115,13 @@ def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable
                 form.locator('input[name="apply"]').evaluate("el => el.click()")
 
                 # 6. Verify status update on the table
-                # TL-SG108E displays port list in table rows where column 1 is Port Number and column 2 is State
                 row_locator = main_frame.locator(f"tr:has-text('Port {port_num}'), tr:has(td:text-is('{port_num}'))")
                 try:
-                    # Wait up to 5 seconds for the state cell to reflect the expected text
                     row_locator.locator(f"text={expected_text}").first.wait_for(state="visible", timeout=5000)
                     log_msg(f"[+] Port {port_num} verified: successfully switched to '{expected_text}'.")
                 except PlaywrightTimeoutError:
                     log_msg(f"[!] Warning: Timed out waiting for table verification on Port {port_num}. Proceeding.", is_error=True)
 
-                # 1-second delay before moving to the next port
                 page.wait_for_timeout(1000)
 
             log_msg(f"[+] All requested ports {target_ports} successfully processed.")
