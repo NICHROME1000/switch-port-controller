@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import sys
-import re
 import ast
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -15,14 +14,12 @@ def parse_ports(port_arg: str):
     """Parse port argument like '[1, 2, 8]' or '8' into a list of unique integers."""
     raw = port_arg.strip()
     try:
-        # Check if array format: [1, 2, 8]
         if raw.startswith("[") and raw.endswith("]"):
             parsed = ast.literal_eval(raw)
             if not isinstance(parsed, (list, tuple)):
                 raise ValueError()
             ports = [int(p) for p in parsed]
         else:
-            # Single integer format
             ports = [int(raw)]
     except Exception:
         raise ValueError(f"Invalid format: '{port_arg}'")
@@ -30,7 +27,6 @@ def parse_ports(port_arg: str):
     if not ports:
         raise ValueError("Port list cannot be empty.")
 
-    # Validate range
     for p in ports:
         if not (1 <= p <= 8):
             raise ValueError(f"Port {p} is out of range. Supported ports are 1 to 8 (Port 9 SFP is not supported).")
@@ -41,7 +37,16 @@ def configure_ports(switch_ip, username, password, target_ports, enable_state):
     base_url = f"http://{switch_ip}"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Launch Chromium with low-memory footprint arguments
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process"
+            ]
+        )
         try:
             context = browser.new_context()
             context.set_default_timeout(15000)
@@ -87,7 +92,7 @@ def configure_ports(switch_ip, username, password, target_ports, enable_state):
             form = main_frame.locator('form[name="portcfg"]')
             form.wait_for(state="attached", timeout=15000)
 
-            # 5. Modify port configurations (SODOLA supports checking multiple boxes simultaneously)
+            # 5. Modify port configurations
             log_msg(f"[*] Selecting Ports {target_ports}...")
             for port_num in target_ports:
                 chk_id = f"port{port_num - 1}"
@@ -128,19 +133,16 @@ if __name__ == "__main__":
     user = sys.argv[2]
     pwd = sys.argv[3]
 
-    # Parse and validate ports
     try:
         ports = parse_ports(sys.argv[4])
     except ValueError as e:
         log_msg(f"[!] Invalid port specification: {e}", is_error=True)
         sys.exit(1)
 
-    # Validate action argument
     action_arg = sys.argv[5].lower()
     if action_arg not in ("enable", "disable"):
         log_msg(f"[!] Invalid action '{sys.argv[5]}'. Action must be 'enable' or 'disable'.", is_error=True)
         sys.exit(1)
 
     is_enable = (action_arg == "enable")
-
     configure_ports(ip, user, pwd, ports, is_enable)
