@@ -43,8 +43,7 @@ def configure_ports(switch_ip, username, password, target_ports, enable_state):
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process"
+                "--disable-gpu"
             ]
         )
         try:
