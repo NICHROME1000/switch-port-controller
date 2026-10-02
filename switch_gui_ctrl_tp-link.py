@@ -43,8 +43,7 @@ def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process"
+                "--disable-gpu"
             ]
         )
         try:
