@@ -35,15 +35,22 @@ def parse_ports(port_arg: str):
 
 def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable_state):
     base_url = f"http://{switch_ip}"
+    exit_code = 0
 
     with sync_playwright() as p:
-        # Launch Chromium with low-memory footprint arguments
+        # Launch Chromium with low-memory footprint arguments (without --single-process)
         browser = p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu"
+                "--disable-gpu",
+                "--no-zygote",
+                "--renderer-process-limit=1",
+                "--disable-extensions",
+                "--disable-component-update",
+                "--disable-background-networking",
+                "--mute-audio"
             ]
         )
         try:
@@ -51,6 +58,14 @@ def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable
             context.set_default_timeout(15000)
             context.set_default_navigation_timeout(15000)
             page = context.new_page()
+
+            # Block unnecessary assets (images, fonts, media) to save RAM and avoid disk thrashing
+            def block_assets(route):
+                if route.request.resource_type in ["image", "media", "font"]:
+                    route.abort()
+                else:
+                    route.continue_()
+            page.route("**/*", block_assets)
 
             log_msg(f"[*] Accessing switch login page ({switch_ip})...")
             page.goto(f"{base_url}/", timeout=15000)
@@ -72,7 +87,8 @@ def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable
                 error_text = ret_info.inner_text().strip()
                 if error_text:
                     log_msg(f"[!] Login failed: {error_text}", is_error=True)
-                    sys.exit(1)
+                    exit_code = 1
+                    return exit_code
 
             try:
                 page.wait_for_selector('frame[name="mainFrame"], frame[src*="Rpm.htm"]', state="attached", timeout=5000)
@@ -82,7 +98,8 @@ def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable
                     log_msg(f"[!] Login failed: {error_text}", is_error=True)
                 else:
                     log_msg("[!] Login failed: Main frame not found.", is_error=True)
-                sys.exit(1)
+                exit_code = 1
+                return exit_code
 
             log_msg("[+] Login successful. Navigating to Port Setting...")
 
@@ -127,9 +144,12 @@ def configure_ports_tlsg108e(switch_ip, username, password, target_ports, enable
 
         except Exception as e:
             log_msg(f"[!] An error occurred: {e}", is_error=True)
-            sys.exit(1)
+            exit_code = 1
         finally:
+            context.close()
             browser.close()
+
+    return exit_code
 
 if __name__ == "__main__":
     if len(sys.argv) < 6:
@@ -147,10 +167,14 @@ if __name__ == "__main__":
         log_msg(f"[!] Invalid port specification: {e}", is_error=True)
         sys.exit(1)
 
-    state = sys.argv[5].lower()
-    if state not in ("enable", "disable"):
-        log_msg(f"[!] Invalid action '{sys.argv[5]}'. Action must be 'enable' or 'disable'.", is_error=True)
+    state_input = sys.argv[5].lower()
+    if state_input in ["enable", "enabled", "1", "up"]:
+        is_enable = True
+    elif state_input in ["disable", "disabled", "0", "down"]:
+        is_enable = False
+    else:
+        log_msg(f"[!] Invalid action '{sys.argv[5]}'. Use 'enable' or 'disable'.", is_error=True)
         sys.exit(1)
 
-    is_enable = (state == "enable")
-    configure_ports_tlsg108e(ip, user, pwd, ports, is_enable)
+    ret = configure_ports_tlsg108e(ip, user, pwd, ports, is_enable)
+    sys.exit(ret)
